@@ -59,8 +59,8 @@ class AbstractModelLoss(object):
         
         sizes = [np.prod(wi) for wi in self.w_shapes]
         if self.args.verbose:
-            print("Weight shapes are: {}, n_total_params: {}".format(dict(zip(self.w_names, self.w_shapes)), 
-                                                                     sum(sizes)))
+            fmt = (dict(zip(self.w_names, self.w_shapes)), sum(sizes))
+            print("Weight shapes are: {}, n_total_params: {}".format(*fmt))
         
     def _parse_optimization_method(self):
         opt_dict = self.args.optimization_method.copy() # dict here
@@ -75,17 +75,21 @@ class AbstractModelLoss(object):
         true_dtypes = [data_i.dtype for data_i in data_pieces]
         
         data_downcasted = []
-        for true_dt, req_dt, name_i, data_i in zip(true_dtypes, self.d_dtypes, self.d_names, data_pieces):
+        for true_dt, req_dt, name_i, data_i in zip(true_dtypes, self.d_dtypes, 
+                                                   self.d_names, data_pieces):
             if true_dt == req_dt:
                 data_downcasted.append(data_i)
             else: # types does not fit
                 if self.args.allow_downcast:
-                    if str(req_dt)[:3] == str(req_dt)[:3]: # int8 ~= int32, float32 ~= float64
+                     # int8 ~= int32, float32 ~= float64
+                    if str(req_dt)[:3] == str(req_dt)[:3]:
                         if self.args.allow_downcast != 'silent':
-                            print("Trying to downcast %s %s->%s, you'd better fix it!" % (name_i, true_dt, req_dt))
+                            print("Trying to downcast %s %s->%s, you'd better "
+                                  "fix it!" % (name_i, true_dt, req_dt))
                         data_downcasted.append(data_i.astype(req_dt))
                         continue
-                raise AssertionError("Not all dtypes match, expected %s got %s" % (self.d_dtypes, true_dtypes))
+                raise AssertionError("Not all dtypes match, expected "
+                                     "%s got %s" % (self.d_dtypes, true_dtypes))
                 
         const = assert_arr_shape(dict(zip(true_shapes, self.d_shapes)))
         return const, record('Data', dict(zip(self.d_names, data_downcasted)))
@@ -96,7 +100,8 @@ class AbstractModelLoss(object):
             if hasattr(val, 'compilation_required') and getattr(val, 'compilation_required'):
                 self._exported_functions.append((key,val))
                 
-        self._exported_functions.append(('loss', self.__class__.loss)) # we always need to compile loss
+        # we always need to compile loss
+        self._exported_functions.append(('loss', self.__class__.loss))
         
     @abc.abstractmethod
     def loss(self, theta, data, const):
@@ -255,6 +260,8 @@ class AutogradModelLoss(AbstractModelLoss):
             setattr(self.raw, func_name, self_stub)
             func_stub = error_stub(func_name)
             setattr(self.__class__, func_name, func_stub)
+import time
+
 class TheanoModelLoss(AbstractModelLoss):
     import theano
     import theano.tensor as T
@@ -262,9 +269,12 @@ class TheanoModelLoss(AbstractModelLoss):
     
     def __init__(self, **kwargs):        
         super().__init__(**kwargs)
+        now = time.clock()
         self.__build_theta_data_symbols()
         self._compile_and_disable_exported_functions()
         self._build()
+        if self.args.verbose:
+            print('compiled: ', time.clock() - now, 'msec')
     
     def fit(self, data, n_max_steps=100):        
         ## theano => no need to pass shared vars there, there are in the context
@@ -455,13 +465,25 @@ class OpsBundle:
         self.bk = bk
         
     def softmax(self, A, axis=-1):
+        bk = self.bk
         # theano does not support elipses; above same as [..., newaxis]
         dim_new_axis =[slice(None, None), ]*(A.ndim)
-        dim_new_axis[axis] = self.bk.newaxis
-        expA = self.bk.exp(A - self.bk.max(A, axis=axis)[tuple(dim_new_axis)])
-        s = self.bk.sum(expA, axis=axis)
+        dim_new_axis[axis] = bk.newaxis
+        expA = bk.exp(A - bk.max(A, axis=axis)[tuple(dim_new_axis)])
+        s = bk.sum(expA, axis=axis)
         return expA / s[dim_new_axis]
+
+    def linear(self, *, X, W, b):
+        bk = self.bk
+        return (bk.dot(X, W) + b[bk.newaxis, :])
     
+    def sigmoid(self, x):
+        # stable version, max |sigmoid_true-sigmoid| < 0.1
+        return (x/(1+self.bk.abs(x)) + 1)/2        
+
+    def true_sigmoid(self, x):
+        return 1/(1+bk.exp(-x))      
+
 class BaseBackend:
     def __init__(self, lookup_object):
         self.__lookup_object = lookup_object
@@ -544,7 +566,8 @@ class UnitBundle:
         self.__name = name
         self.__prefix = name+'__'
         self.__template = weight_template
-        self.global_template = {self.__prefix+key:val for key, val in weight_template.items()}
+        self.global_template = {self.__prefix+key:val 
+                                for key, val in weight_template.items()}
         self.data_template = data_template
         self.global_keys = set(self.global_template.keys())
         self.registered = False
